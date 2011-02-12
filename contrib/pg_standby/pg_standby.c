@@ -62,6 +62,7 @@ static volatile sig_atomic_t signaled = false;
 
 char	   *archiveLocation;	/* where to find the archive? */
 char	   *triggerPath;		/* where to find the trigger file? */
+char	   *pausePath;			/* where to find the pause file? */
 char	   *xlogFilePath;		/* where we are going to restore to */
 char	   *nextWALFileName;	/* the file we need to get from archive */
 char	   *restartWALFileName; /* the file from which we can restart restore */
@@ -469,6 +470,20 @@ CheckForExternalTrigger(void)
 	return;
 }
 
+
+/*
+ * Look for a pause file, if that option has been selected
+ *
+ * We use stat() here because pausePath is always a file rather than
+ * potentially being in an archive
+ */
+static bool
+CheckForPauseFile(void)
+{
+	return (pausePath && stat(pausePath, &stat_buf) == 0);
+}
+
+
 /*
  * RestoreWALFileForRecovery()
  *
@@ -526,6 +541,7 @@ usage(void)
 	printf("  -k NUMFILESTOKEEP  if RESTARTWALFILE not used, removes files prior to limit\n"
 		   "                     (0 keeps all)\n");
 	printf("  -l                 does nothing; use of link is now deprecated\n");
+	printf("  -p PAUSEFILE       defines a pause file; pause recovery if this file is present\n"		   "                     (no default)\n");
 	printf("  -r MAXRETRIES      max number of times to retry, with progressive wait\n"
 		   "                     (default=3)\n");
 	printf("  -s SLEEPTIME       seconds to wait between file checks (min=1, max=60,\n"
@@ -596,7 +612,7 @@ main(int argc, char **argv)
 	(void) signal(SIGQUIT, sigquit_handler);
 #endif
 
-	while ((c = getopt(argc, argv, "cdk:lr:s:t:w:")) != -1)
+	while ((c = getopt(argc, argv, "cdk:lp:r:s:t:w:")) != -1)
 	{
 		switch (c)
 		{
@@ -624,6 +640,9 @@ main(int argc, char **argv)
 #ifdef NOT_USED
 				restoreCommandType = RESTORE_COMMAND_LINK;
 #endif
+				break;
+			case 'p':			/* Pause file */
+				pausePath = optarg;
 				break;
 			case 'r':			/* Retries */
 				maxretries = atoi(optarg);
@@ -767,6 +786,25 @@ main(int argc, char **argv)
 	 */
 	for (;;)
 	{
+		int pausedIterations = 0;
+
+		while (CheckForPauseFile()) {
+			/* TODO: respect trigger/signals in the pause loop as well */
+
+			if (!(pausedIterations % 60)) {
+				fprintf(stderr, "pausing due to existance of pause file '%s'; "
+				        "remove to continue recovery.  (currently paused %d seconds)\n",
+				        pausePath, pausedIterations);
+			}
+			pausedIterations++;
+			pg_usleep(1000000L);	/* check for pause file every second */
+		}
+		if (pausedIterations) {
+			fprintf(stderr, "pause file '%s' removed; continuing after pausing "
+			        "for %d seconds.\n",
+			        pausePath, pausedIterations);
+		}
+
 		/* Check for trigger file or signal first */
 		CheckForExternalTrigger();
 #ifndef WIN32
